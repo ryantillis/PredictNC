@@ -1,0 +1,30 @@
+---
+title: "Predicting NC Election"
+author: "Ryan Tillis"
+date: "11/4/2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+The goal is to build a machine learning to predict NC election results based on early voting turnout. The premise is that over the past 12 years of available data there should emerge a trend or relationship between early voting turnouts at the precinct level and voter turnout on actual election day.  
+
+First we have to wrangle to older data sets which are in xlsx, tab delimited and csv format and then aggregate all of the data by county and voter party. Then we can split the data into training and test sets 
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
