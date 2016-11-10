@@ -1,6 +1,6 @@
 
-aggregate_NC <- function(data){
-data <- read.csv("absentee11xx08xx2016.csv")
+aggregate_NC <- function(x){
+data <- read.csv(x)
 head(data)
 names(data)
 unique(data$ballot_req_type)
@@ -55,4 +55,7 @@ agg_party <- data %>% group_by(county_desc) %>% summarise_each(funs(sum), DEM, R
 agg_age <- data %>% group_by(county_desc) %>% summarise_each(funs(mean), age)
 agg_data <- left_join(agg_party,agg_age)
 agg_race <- data %>% group_by(county_desc) %>% summarise_each(funs(sum), WHITE, BLACK, NATIVE, UND, TWO, ASIAN)
-agg_data <- left_join(agg_data,agg_race)}
+agg_data <- left_join(agg_data,agg_race)
+
+name <- paste("AGGREGATED", x, sep = "")
+write.csv(agg_data, file = name)}

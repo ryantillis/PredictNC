@@ -1,7 +1,7 @@
 ---
 title: "Predicting NC Election"
 author: "Ryan Tillis"
-date: "11/4/2016"
+date: "11/7/2016"
 output: html_document
 ---
 
@@ -11,20 +11,1976 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## R Markdown
 
-The goal is to build a machine learning to predict NC election results based on early voting turnout. The premise is that over the past 12 years of available data there should emerge a trend or relationship between early voting turnouts at the precinct level and voter turnout on actual election day.  
+The goal is to build a machine learning to predict NC election results based on early voting turnout. The premise is that over the past 12 years of available data there should emerge a trend or relationship between early voting turnouts at the precinct/county level and voter turnout on actual election day.  
 
-First we have to wrangle to older data sets which are in xlsx, tab delimited and csv format and then aggregate all of the data by county and voter party. Then we can split the data into training and test sets 
+NC is interesting because they went for Obama in 08 and Romney in 2012. 
 
-```{r cars}
-summary(cars)
+The model should be understood to have inherent limitations. The model doesn't account or try to weigh in rule changes or demographic changes. My inherent assumption is that there exists some coefficients BETA_D, BETA_R, BETA_U that relate early voting turnout to election day turnout. I will extract these coefficients using well known machine learning methodologies. I will also weigh in coefficient predictors for gender as well as race.
+
+I will test the model by randomly sampling counties across years and measuring predicted outputs against the actual election day turnouts. The validation set for the model will be the early voting results for 2016 in North Carolina. My goal is to predict election day outcome within .5%.
+
+To reproduce the data processing you will need to run R on a x64 bit system with at least 16GB of RAM. You might be able to get away with 12GB but NO PROMISES. You will need to install the data.table, dplyr and caret packages.
+
+Some of the following code is confusing. Some of the strangeness is due to the quirky nature of the data collection in NC election over the past decade. As an example, 2 counties are missing from the NCBOE data in the 2015 election namely Camden and Clay. There's a lot of data on municipal elections and referendums. Most of the quirkiness is because i was doing this all on the fly.
+
+This isn't intended to be a perfect model, there is a lot of room for improvement. The point is to create a systematic, data-in model-out turnout prediction based on NCBOE early voter data. I put all this together in the last 2 days because I wanted my prediction out there in case it is good. :) I intend to write a concise and readable report as a reproducible markdown file in the next week.
+
+##Data Processing
+I processed a single csv file as a test case, available on the NCBOE website. From that I built two function, one for csv files and one for tab delimited.
+```{r Data loading, eval = FALSE}
+library(data.table)
+library(dplyr)
+dat <- fread("NCBOE.csv", header = TRUE, data.table = TRUE)
+#unique(dat$voted_party_cd)
+dat$voted_party_cd <- as.factor(dat$voted_party_cd)
+dat$county_desc <- as.factor(dat$county_desc)
+dat$election_lbl <- as.factor(dat$election_lbl)
+dat$voting_method <- as.factor(dat$voting_method)
+dat$election_desc <- as.factor(dat$election_desc)
+
+#Getting rid of some columns
+dat[,county_id := NULL]
+dat[,voter_reg_num := NULL]
+dat[,ncid := NULL]
+dat[,vtd_label := NULL]
+dat[,vtd_description := NULL]
+dat[,voted_county_id := NULL]
+
+dat[, DEM := 0]
+dat[, REP := 0]
+dat[, UNA := 0]
+dat[, LIB := 0]
+
+#Note to NCBOE, store your variables as binary...it makes aggregation easier.
+#Creating Dummy variables to aggregate party counts
+
+dat[voted_party_cd=="REP", REP:=1]
+dat[voted_party_cd=="DEM", DEM:=1]
+dat[voted_party_cd=="UNA", UNA:=1]
+dat[voted_party_cd=="LIB", LIB:=1]
+
+
+VM <- unique(dat$voting_method)
+
+#Could Perform all these actions as a loop but it is just as fast this way and more illustrative or what's going on
+dat[, ABSENTEE_ONESTOP := 0]
+dat[, IN_PERSON := 0]
+dat[, ABSENTEE_BY_MAIL := 0]
+dat[, ABSENTEE_CURBSIDE := 0]
+dat[, CURBSIDE := 0]
+dat[, PROVISIONAL := 0]
+dat[, TRANSFER := 0]
+dat[, ELIGIBLE_DID_NOT_VOTE := 0]
+dat[, ABSENTEE := 0]
+dat[, LEGACY := 0]
+dat[, ABSENTEE_DID_NOT_VOTE := 0]
+
+dat[voting_method==VM[1], ABSENTEE_ONESTOP := 1]
+dat[voting_method==VM[2], IN_PERSON := 1]
+dat[voting_method==VM[3], ABSENTEE_BY_MAIL := 1]
+dat[voting_method==VM[5], ABSENTEE_CURBSIDE := 1]
+dat[voting_method==VM[6], CURBSIDE := 1]
+dat[voting_method==VM[7], PROVISIONAL := 1]
+dat[voting_method==VM[8], TRANSFER := 1]
+dat[voting_method==VM[9], ELIGIBLE_DID_NOT_VOTE := 1]
+dat[voting_method==VM[10], ABSENTEE := 1]
+dat[voting_method==VM[11], LEGACY := 1]
+dat[voting_method==VM[12], ABSENTEE_DID_NOT_VOTE := 1]
+
+#Check the relevance of each of column and getting rid of 20:24 because ~200 instances across 30,000,000 record and will not effect percentages
+
+apply(dat[,10:24, with = FALSE],2,sum)
+
+dat <-dat[,TRANSFER := NULL]
+dat <-dat[,ELIGIBLE_DID_NOT_VOTE := NULL]
+dat <-dat[,ABSENTEE := NULL]
+dat <-dat[,LEGACY := NULL]
+dat <-dat[,ABSENTEE_DID_NOT_VOTE := NULL]
+
+#DOS - DEM ABS ONE STOP
+#ROS - REP ABS ONE STOP
+#LOS - LIB ABS ONE STOP
+#UOS - UNA ABS ONE STOP
+
+#DIP - DEM IN PERSON
+#RIP - REP IN PERSON
+#UIP - UNA IN PERSON
+#LIP - LIB IN PERSON
+
+#DBM - D ABS BY MAIL
+#RBM - R ABS BY MAIL
+#UBM - U ABS BY MAIL
+#LBM - L ABS BY MAIL
+
+#DCS - D ABS CS
+#RCS - R ABS CURBSIDE
+#UCS - U ABS CURBSIDE
+#LCS - L ABS CURBSIDE
+
+#DC - D CURBSIDE
+#RC - R CURBSIDE
+#UC - U CURBSIDE
+#LC - L CURBSIDE
+
+#DPR - D PROV
+#RPR - R PROV
+#UPR - U PROV
+#LPR - L PROV
+
+#Using simple summations and the dplyr package to create new dummy variables quickly
+
+data <- mutate(dat, DOS = DEM + ABSENTEE_ONESTOP, ROS = REP + ABSENTEE_ONESTOP, UOS = UNA + ABSENTEE_ONESTOP, LOS = LIB + ABSENTEE_ONESTOP)
+data <- mutate(data, DIP = DEM + IN_PERSON, RIP = REP + IN_PERSON, UIP = UNA + IN_PERSON, LIP = LIB + IN_PERSON)
+data <- mutate(data, DBM = DEM + ABSENTEE_BY_MAIL, RBM = REP + ABSENTEE_BY_MAIL, UBM = UNA + ABSENTEE_BY_MAIL, LBM = LIB + ABSENTEE_BY_MAIL)
+data <- mutate(data, DCS = DEM + ABSENTEE_CURBSIDE, RCS = REP + ABSENTEE_CURBSIDE, UCS = UNA + ABSENTEE_CURBSIDE, LCS = LIB + ABSENTEE_CURBSIDE)
+data <- mutate(data, DC = DEM + CURBSIDE, RC = REP + CURBSIDE, UC = UNA + CURBSIDE, LC = LIB + CURBSIDE)
+data <- mutate(data, DPR = DEM + PROVISIONAL, RPR = REP + PROVISIONAL, UPR = UNA + PROVISIONAL, LPR = LIB + PROVISIONAL)
+
+data <- as.data.table(data)
+
+#Changing 1's to 0's
+
+data[DOS==1, DOS:=0]
+data[ROS==1, ROS:=0]
+data[LOS==1, LOS:=0]
+data[UOS==1, UOS:=0]
+
+data[DIP==1, DIP:=0]
+data[RIP==1, RIP:=0]
+data[UIP==1, UIP:=0]
+data[LIP==1, LIP:=0]
+
+data[DBM==1, DBM:=0]
+data[RBM==1, RBM:=0]
+data[UBM==1, UBM:=0]
+data[LBM==1, LBM:=0]
+
+data[DCS==1, DCS:=0]
+data[RCS==1, RCS:=0]
+data[UCS==1, UCS:=0]
+data[LCS==1, LCS:=0]
+
+data[DC==1, DC:=0]
+data[RC==1, RC:=0]
+data[UC==1, UC:=0]
+data[LC==1, LC:=0]
+
+data[DPR==1, DPR:=0]
+data[RPR==1, RPR:=0]
+data[UPR==1, UPR:=0]
+data[LPR==1, LPR:=0]
+
+#Changing 2's to 1's
+
+data[DOS==2, DOS:=1]
+data[ROS==2, ROS:=1]
+data[LOS==2, LOS:=1]
+data[UOS==2, UOS:=1]
+
+data[DIP==2, DIP:=1]
+data[RIP==2, RIP:=1]
+data[UIP==2, UIP:=1]
+data[LIP==2, LIP:=1]
+
+data[DBM==2, DBM:=1]
+data[RBM==2, RBM:=1]
+data[UBM==2, UBM:=1]
+data[LBM==2, LBM:=1]
+
+data[DCS==2, DCS:=1]
+data[RCS==2, RCS:=1]
+data[UCS==2, UCS:=1]
+data[LCS==2, LCS:=1]
+
+data[DC==2, DC:=1]
+data[RC==2, RC:=1]
+data[UC==2, UC:=1]
+data[LC==2, LC:=1]
+
+data[DPR==2, DPR:=1]
+data[RPR==2, RPR:=1]
+data[UPR==2, UPR:=1]
+data[LPR==2, LPR:=1]
+
+#ACTIVE 
+aggregate_data <- data %>% group_by(county_desc, election_lbl) %>% summarise_each(funs(sum), DOS, ROS, UOS, LOS, DIP, RIP, UIP, LIP, DBM, RBM, UBM, LBM, DCS, RCS, UCS, LCS, DC, RC, UC, LC, DPR, RPR, UPR, LPR)
+
+agg_dat <- as.data.table(aggregate_data)
+row_sums <- apply(aggregate_data[3:26],1,sum)
+aggD <- cbind(agg_dat, row_sums)
+
+indexNOV <- grep("^11/*",aggD$election_lbl)
+data_Nov <- aggD[indexNOV]
+
+AGGD <- as.data.table(aggD)
+
+index06 <- grep("/2006", data_Nov$election_lbl)
+index07 <- grep("/2007", data_Nov$election_lbl)
+index08 <- grep("/2008", data_Nov$election_lbl)
+index09 <- grep("/2009", data_Nov$election_lbl)
+index10 <- grep("/2010", data_Nov$election_lbl)
+index11 <- grep("/2011", data_Nov$election_lbl)
+index12 <- grep("/2012", data_Nov$election_lbl)
+index13 <- grep("/2013", data_Nov$election_lbl)
+index14 <- grep("/2014", data_Nov$election_lbl)
+#index15 <- grep("/2015", data_Nov$election_lbl)
+
+index06a <- grep("/2006", aggD$election_lbl)
+index07a <- grep("/2007", aggD$election_lbl)
+index08a <- grep("/2008", aggD$election_lbl)
+index09a <- grep("/2009", aggD$election_lbl)
+index10a <- grep("/2010", aggD$election_lbl)
+index11a <- grep("/2011", aggD$election_lbl)
+index12a <- grep("/2012", aggD$election_lbl)
+index13a <- grep("/2013", aggD$election_lbl)
+index14a <- grep("/2014", aggD$election_lbl)
+
+#If in the index matches
+#Select Appropriate list number [1:13 corresponds to 2004-2016]
+#Match County Value and Left Join the table/Change value
+
+#2015 i missing CAMDEN and CLAY are missing from TOTAL data
+
+totals <- list.files()[1:13]
+#List of Registered voters totaled by county per year [1:13 corresponds to 2004-2016]
+TOT <- lapply(totals, read.csv)
+TOT2 <- TOT[3:13]
+
+#Renaming Totals to join with aggregated data
+names(TOT2[[1]])[1] <- c("county_desc")
+names(TOT2[[2]])[1] <- c("county_desc") 
+names(TOT2[[3]])[1] <- c("county_desc") 
+names(TOT2[[4]])[1] <- c("county_desc") 
+names(TOT2[[5]])[1] <- c("county_desc") 
+names(TOT2[[6]])[1] <- c("county_desc") 
+names(TOT2[[7]])[1] <- c("county_desc") 
+names(TOT2[[8]])[1] <- c("county_desc") 
+names(TOT2[[9]])[1] <- c("county_desc") 
+names(TOT2[[10]])[1] <- c("county_desc")
+
+TOT06 <- left_join(data_Nov[index06],TOT2[[1]])
+TOT07 <- left_join(data_Nov[index07],TOT2[[2]])
+TOT08 <- left_join(data_Nov[index08],TOT2[[3]])
+TOT09 <- left_join(data_Nov[index09],TOT2[[4]])
+TOT10 <- left_join(data_Nov[index10],TOT2[[5]])
+TOT11 <- left_join(data_Nov[index11],TOT2[[6]])
+TOT12 <- left_join(data_Nov[index12],TOT2[[7]])
+TOT13 <- left_join(data_Nov[index13],TOT2[[8]])
+TOT14 <- left_join(data_Nov[index14],TOT2[[9]])
+TOT15 <- left_join(data_Nov[index15],TOT2[[10]])
+
+modelset <- rbind(TOT06,TOT07,TOT08,TOT09,TOT10,TOT11,TOT12,TOT13,TOT14,TOT15)
+
+modelset$Libertarians <- gsub(",","",modelset$Libertarians)
+modelset$Democrats <- gsub(",","",modelset$Democrats)
+modelset$Republicans <- gsub(",","",modelset$Republicans)
+modelset$Unaffiliated <- gsub(",","",modelset$Unaffiliated)
+modelset$White <- gsub(",","",modelset$White)
+modelset$Black <- gsub(",","",modelset$Black)
+modelset$American.Indian <- gsub(",","",modelset$American.Indian)
+modelset$Other <- gsub(",","",modelset$Other)
+modelset$Hispanic <- gsub(",","",modelset$Hispanic)
+modelset$Male <- gsub(",","",modelset$Male)
+modelset$Female <- gsub(",","",modelset$Female)
+modelset$Total <- gsub(",","",modelset$Total)
+
+modelset$Democrats <- as.numeric(modelset$Democrats)
+modelset$Republicans <- as.numeric(modelset$Republicans)
+modelset$Libertarians <- as.numeric(modelset$Libertarians)
+modelset$Unaffiliated <- as.numeric(modelset$Unaffiliated)
+modelset$White <- as.numeric(modelset$White)
+modelset$Black <- as.numeric(modelset$Black)
+modelset$American.Indian <- as.numeric(modelset$American.Indian)
+modelset$Other <- as.numeric(modelset$Other)
+modelset$Hispanic <- as.numeric(modelset$Hispanic)
+modelset$Male <- as.numeric(modelset$Male)
+modelset$Female <- as.numeric(modelset$Female)
+modelset$Total <- as.numeric(modelset$Total)
+
+#Rebuilding model without the added variance from non-presidential, non-senate years
+#Rerun the above
+modelset <- rbind(TOT06,TOT08,TOT10,TOT12,TOT14)
+
+#Considering getting rid of 2006 because th number are oddly low which suggests inconsistent data collection and possibly entry errors, remember to rerun above ***NOTE To self create function for this
+
+modelset <- rbind(TOT06,TOT08,TOT10,TOT12,TOT14)
+
+modelset[is.na(modelset)] <- 0
+modelset[is.nan(modelset)] <- 0
+
+#NEED TO CREATE VARIABLE THAT IS DIP+DC+DPR (FOR)
+
+
+#Testing 2012 numbers
+modelset <- rbind(TOT06,TOT08,TOT12,TOT14)
+sum(modelset[201:300,]$TOE_DEM*modelset[201:300,]$Democrats) #683061
+
+#69.7% DEM turnout for 2012
+sum(modelset[201:300,]$TOE_DEM*modelset[201:300,]$Democrats+
+           modelset[201:300,]$DOS_DEM*modelset[201:300,]$Democrats+
+           modelset[201:300,]$DBM_DEM*modelset[201:300,]$Democrats)/(sum(modelset[201:300,]$Democrats))
+
+#72.6%
+sum(modelset[201:300,]$TOE_REP*modelset[201:300,]$Republicans+
+           modelset[201:300,]$ROS_REP*modelset[201:300,]$Republicans+
+           modelset[201:300,]$RBM_REP*modelset[201:300,]$Republicans)/(sum(modelset[201:300,]$Republicans))
+
+#60.16%
+sum(modelset[201:300,]$TOE_UNA*modelset[201:300,]$Unaffiliated+
+           modelset[201:300,]$UOS_UNA*modelset[201:300,]$Unaffiliated+
+           modelset[201:300,]$UBM_UNA*modelset[201:300,]$Unaffiliated)/(sum(modelset[201:300,]$Unaffiliated))
+
+
+#modelset <- mutate(modelset, DOS_DEM = DOS/Democrats, ROS_REP = ROS/Republicans, UOS_UNA = UOS/Unaffiliated, LOS_LIB = LOS/Libertarians, DIP_DEM = DIP/Democrats, RIP_REP = RIP/Republicans, UIP_UNA = UIP/Unaffiliated, LIP_LIB = LIP/Libertarians)
+
+modelset <- mutate(modelset, DOS_DEM = DOS/Democrats, ROS_REP = ROS/Republicans, UOS_UNA = UOS/Unaffiliated, LOS_LIB = LOS/Libertarians, TOE_DEM = (DC+DPR+DIP)/Democrats, TOE_REP = (RC+RPR+RIP)/Republicans, TOE_UNA = (UC+UPR+UIP)/Unaffiliated, LIP_LIB = (LC+LPR+LIP)/Libertarians, DBM_DEM = DBM/Democrats, RBM_REP = RBM/Republicans, UBM_UNA = UBM/Unaffiliated, LBM_LIB = LBM/Libertarians)
+
+modelset <- mutate(modelset, DCS_DEM = DCS/Democrats, RCS_REP = RCS/Republicans, UCS_UNA = UCS/Unaffiliated, LCS_LIB = LCS/Libertarians)
+
+modelset <- mutate(modelset, 
+                   DOS_DEM = DOS/Democrats, 
+                   ROS_REP = ROS/Republicans, 
+                   UOS_UNA = UOS/Unaffiliated, 
+                   LOS_LIB = LOS/Libertarians, 
+                   DIP_DEM = DIP/Democrats, 
+                   RIP_REP = RIP/Republicans, 
+                   UIP_UNA = UIP/Unaffiliated, 
+                   LIP_LIB = LIP/Libertarians, 
+                   DBM_DEM = DBM/Democrats, 
+                   RBM_REP = RBM/Republicans, 
+                   UBM_UNA = UBM/Unaffiliated, 
+                   LBM_LIB = LBM/Libertarians, 
+                   DCS_DEM = DCS/Democrats, 
+                   RCS_REP = RCS/Republicans, 
+                   UCS_UNA = UCS/Unaffiliated,
+                   LCS_LIB = LCS/Libertarians)
+
+#Need to create a factor variable to account for the type of election year. P <- Presidential, F-Federal, O-Offyear
+index06b <- grep("/2006", modelset$election_lbl) #house of reps and 1/3 of senate
+index07b <- grep("/2007", modelset$election_lbl) #off
+index08b <- grep("/2008", modelset$election_lbl) #president, governer, house, 1/3 Senate
+index09b <- grep("/2009", modelset$election_lbl)#off
+index10b <- grep("/2010", modelset$election_lbl)#House, 1/3 Senate
+index11b <- grep("/2011", modelset$election_lbl)#off
+index12b <- grep("/2012", modelset$election_lbl)#presidential, governer, H 1/3 S
+index13b <- grep("/2013", modelset$election_lbl)#off
+index14b <- grep("/2014", modelset$election_lbl)#House, 1/3 S
+index15b <- grep("/2015", modelset$election_lbl)#off
+
+
+modelset[,type:= "A"]
+
+modelset[index06b, type:="F"]
+modelset[index07b, type:="O"]
+modelset[index08b, type:="P"]
+modelset[index09b, type:="F"]
+modelset[index10b, type:="O"]
+modelset[index11b, type:="P"]
+modelset[index12b, type:="F"]
+modelset[index13b, type:="O"]
+modelset[index14b, type:="P"]
+modelset[index15b, type:="O"]
+
+modelset$type <- as.facter(modelset$type)
+
+# Predicting DIP,RIP,LIP,UIP (In Person, election day votes for a given party) by DOS,ROS,UOS,LOS (On-site Absentee votes by party) as percentages of the total registered voters for that year at election day (In columns Republicans, Democrats, Unaffiliated, Libertarians)
+#Creating Training and test sets from the 1000
+train<-sample_frac(modelset, 0.7)
+sid<-as.numeric(rownames(train)) # because rownames() returns character
+test<-modelset[-sid,]
+head(train)
+
+model <- train(DIP_DEM~DOS_DEM+ROS_REP+UOS_UNA+DBM_DEM+RBM_REP+UBM_UNA+factor(county_desc), method = "glm", data =train)
+
+#ACTIVE MODEL
+model_1 <- train(TOE_DEM~
+                      DOS_DEM+
+                      ROS_REP+
+                      UOS_UNA+
+                      LOS_LIB+
+                      DBM_DEM+
+                      RBM_REP+
+                      UBM_UNA+
+                      LBM_LIB+
+                      DPR_DEM+
+                      RPR_REP+
+                      UPR_UNA+
+                      LPR_LIB+
+                      county_desc, method = "glm", data =train)
+
+pred_train1 <- predict(model,train)
+
+#Highest RMSE .0418 with Rsqared at .56, this suggests 60% of the variance in election day turnout can be accounted for in this model
+set.seed(22)
+model <- train(DIP_DEM~DOS_DEM+ROS_REP+UOS_UNA+DBM_DEM+RBM_REP+UBM_UNA+county_desc, method = "lm", data =train)
+
+qplot(train$DIP_DEM,pred_train1)
+
+qplot(train$DIP_DEM,pred_train1)
+lm <- lm(train$DIP_DEM~pred_train1)
+
+#With Election Year accounts for 70% of the variance and RMSE of .032
+#With all year RMSE is .048 and Rsqaured in 86%
+
+#Need to test changes in standard error by including other years
+
+#Just linear model gives a .89 adjusted R^2 a .0421 RSE and .0488 RMSE and .855 R^2
+
+model_2 <- train(DIP_DEM~
+                   DOS_DEM+
+                   ROS_REP+
+                   UOS_UNA+
+                   LOS_LIB+
+                   DBM_DEM+
+                   RBM_REP+
+                   UBM_UNA+
+                   LBM_LIB+
+                   factor(county_desc)+
+                     factor(type), method = "glm", data =train)
+
+
+#Achieved RMSE .0324 and R^2 .9375
+model_3 <- train(DIP_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+#Using a random forest gives .937 R^2 and .0325 RMSE without race/gender
+model_all <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+Evaluating RF fit against test data
+pred_test1 <- predict(model_all,test)
+qplot(test$DIP_DEM,pred_test1)
+m1 <- lm(test$DIP_DEM~pred_test1)
+summary(m1) #adjusted and multip R^2 at .928 without race/gender
+
+model_all_dem1 <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+#Adjusted and multiple R^2 is 94% RSE .03 p value < 2.2e-16
+#Performs better on test set than the actual training set
+
+
+#Below achieves RMSE .0339 and R^2 .9467
+model_all_REP <- train(TOE_REP~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+
+model_all_UNA <- train(TOE_UNA~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+model_all_LIB <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+####FOR Random forest points of high leverage are 509 566 and 722
+####Points of high outliers 294, 519, 509
+####QQ 509, 519,294
+
+#Looking at Residuals point 155,88m and 250 are the biggest oultliers, 88, 172 and 237 exert the most leverage
+#88 is Madison county 11/07/2006 high turnout 3x ABS ONSITE VALUES, 
+#172 is Currituck county in 2014 this might sugges LIMITED ACCES TO EARLY VOTING IN THE COUNTY - > CHECK MAPS
+#237 is in Currituck county in 2006
+# 155 corresponds to Robeson County in 2012 which had a very high early voter turnout for democrats but the election day turnout did not linearly increase (it was capped), I would consider weighting this point even more as a way to account for early voting initiatives taking away from election day turnout
+# 250 Is Robeson in 2006, which suggests de
+plot(lm)
+
+
+```
+
+##Taking a Step Back
+Here i take steps to make sure my model is not overfitting the data.
+
+```{r OF}
+this <- cfs(TOE_DEM~
+                +                            DOS_DEM+
+                +                            ROS_REP+
+                +                            UOS_UNA+
+                +                            LOS_LIB+
+                +                            DBM_DEM+
+                +                            RBM_REP+
+                +                            UBM_UNA+
+                +                            LBM_LIB+
+                +                            Democrats+
+                +                            Republicans+
+                +                            Unaffiliated+
+                +                            Libertarians+
+                +                            Male+
+                +                            Female+
+                +                            American.Indian+
+                +                            Black+
+                +                            White+
+                +                            Hispanic+
+                +                            Other,data = train)
+as.simple.formula(this, "TOE_DEM") #This package uses the best first search algorithm and measures of entropy and correlation to suggest regressors. The outcome recommends using only onsite EV DEM onsite EV REP and BY MAIL DEM as variables, so i will refit my model with only this variables.
+
+#RMSE .03485 R^2.928
+model_occ_dem <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       DBM_DEM+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+pred_test1 <- predict(model_all,test)
+qplot(test$TOE_DEM,pred_test1)
+m1 <- lm(test$TOE_DEM~pred_test1)
+summary(m1) #
+
+#NEED TO RUN FOR OTHER PARTIES to select proper regressors for each party model
+this <- cfs(TOE_REP~
+                +                            DOS_DEM+
+                +                            ROS_REP+
+                +                            UOS_UNA+
+                +                            LOS_LIB+
+                +                            DBM_DEM+
+                +                            RBM_REP+
+                +                            UBM_UNA+
+                +                            LBM_LIB+
+                +                            Democrats+
+                +                            Republicans+
+                +                            Unaffiliated+
+                +                            Libertarians+
+                +                            Male+
+                +                            Female+
+                +                            American.Indian+
+                +                            Black+
+                +                            White+
+                +                            Hispanic+
+                +                            Other,data = train)
+as.simple.formula(this, "TOE_REP") 
+
+this <- cfs(TOE_UNA~
+                +                            DOS_DEM+
+                +                            ROS_REP+
+                +                            UOS_UNA+
+                +                            LOS_LIB+
+                +                            DBM_DEM+
+                +                            RBM_REP+
+                +                            UBM_UNA+
+                +                            LBM_LIB+
+                +                            Democrats+
+                +                            Republicans+
+                +                            Unaffiliated+
+                +                            Libertarians+
+                +                            Male+
+                +                            Female+
+                +                            American.Indian+
+                +                            Black+
+                +                            White+
+                +                            Hispanic+
+                +                            Other,data = train)
+as.simple.formula(this, "TOE_UNA") 
+
+this <- cfs(TOE_LIB~
+                +                            DOS_DEM+
+                +                            ROS_REP+
+                +                            UOS_UNA+
+                +                            LOS_LIB+
+                +                            DBM_DEM+
+                +                            RBM_REP+
+                +                            UBM_UNA+
+                +                            LBM_LIB+
+                +                            Democrats+
+                +                            Republicans+
+                +                            Unaffiliated+
+                +                            Libertarians+
+                +                            Male+
+                +                            Female+
+                +                            American.Indian+
+                +                            Black+
+                +                            White+
+                +                            Hispanic+
+                +                            Other,data = train)
+as.simple.formula(this, "TOE_LIB") 
+
+
+```
+
+
+
+```{r onyears7}
+modelset <- rbind(TOT06,TOT08,TOT10,TOT12,TOT14)
+
+set.seed(22)
+#mtry  RMSE        Rsquared 
+#    2   0.05227963  0.4583328
+#   55   0.04569646  0.4950770
+#  108   0.04629954  0.4782797
+
+model_all_dem7 <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data = train)
+pred_train7d <- predict(model_all_dem7,train)
+train$TOE_DEM
+#    mtry  RMSE        Rsquared 
+ #   2   0.05298675  0.4667760
+ #  55   0.04891835  0.3709987
+ # 108   0.04948986  0.3566328
+
+model_all_rep7 <- train(TOE_REP~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data = train)
+pred_train7r <- predict(model_all_rep7,train)
+
+#  mtry  RMSE        Rsquared 
+#    2   0.04730953  0.3862685
+#   55   0.04180042  0.4594040
+#  108   0.04245519  0.4440987
+model_all_una7 <- train(TOE_UNA~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data = train)
+pred_train7u <- predict(model_all_una7,train)
+
+#  mtry  RMSE       Rsquared 
+#    2   0.1550972  0.4192995
+#   55   0.1420255  0.4726030
+#  108   0.1466096  0.4408205
+model_all_lib7 <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data = train)
+pred_train7l <- predict(model_all_lib7,train)
+
+pred_all7 <- pred_train7d+pred_train7r+pred_train7u+pred_train7l
+tot_train <- train$TOE_DEM+train$TOE_REP+train$TOE_UNA+train$TOE_LIB
+gg <- ggplot(data = as.data.frame(cbind(pred_all7,tot_train)), aes(x=pred_all7,y=tot_train))
+```
+
+```{R pred7}
+#0.7028824
+predict_2016d7 <- predict(model_all_dem7, TOTAL)
+sum(predict_2016d7*TOTAL$Democrats+
+           +         TOTAL$DOS_DEM*TOTAL$Democrats+
+           +         TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Democrats))
+
+#0.7450541
+predict_2016r7 <- predict(model_all_rep7, TOTAL)
+sum(predict_2016r7*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans)/(sum(TOTAL$Republicans))
+
+#0.6328979
+predict_2016u7 <- predict(model_all_una7, TOTAL)
+sum(predict_2016u7*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated)/(sum(TOTAL$Unaffiliated))
+
+#0.5876286
+predict_2016l7 <- predict(model_all_lib7, TOTAL)
+sum(predict_2016l7*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+#2947459
+sum(TOTAL$LOS_LIB*TOTAL$Libertarians+TOTAL$UOS_UNA*TOTAL$Unaffiliated+TOTAL$ROS_REP*TOTAL$Republicans+TOTAL$DOS_DEM*TOTAL$Democrats)
+#Total by mail 155265
+sum(TOTAL$LBM_LIB*TOTAL$Libertarians+TOTAL$UBM_UNA*TOTAL$Unaffiliated+TOTAL$RBM_REP*TOTAL$Republicans+TOTAL$DBM_DEM*TOTAL$Democrats)
+#total election day 1684461
+sum(predict_2016d7*TOTAL$Democrats+predict_2016r7*TOTAL$Republicans+predict_2016u7*TOTAL$Unaffiliated+predict_2016l7*TOTAL$Libertarians)
+
+#0.6941623
+sum(predict_2016r7*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans+
+           predict_2016u7*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated+
+           predict_2016l7*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians+
+           predict_2016d7*TOTAL$Democrats+
+           TOTAL$DOS_DEM*TOTAL$Democrats+
+           TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Republicans+TOTAL$Unaffiliated+TOTAL$Libertarians+TOTAL$Democrats))
+
+#4787185
+sum(predict_2016r7*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans+
+           predict_2016u7*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated+
+           predict_2016l7*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians+
+           predict_2016d7*TOTAL$Democrats+
+           TOTAL$DOS_DEM*TOTAL$Democrats+
+           TOTAL$DBM_DEM*TOTAL$Democrats)
+```
+
+
+```{r checking RSE7}
+#Residual standard error: 0.04052 on 98 degrees of freedom
+#Multiple R-squared:  0.5631,	Adjusted R-squared:  0.5586 
+#F-statistic: 126.3 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test7r <- predict(model_all_rep7,test)
+qplot(test$TOE_REP,pred_test7r)
+m7r <- lm(test$TOE_REP~pred_test7r)
+summary(m7r) 
+plot(m7r)
+
+#Residual standard error: 0.03758 on 98 degrees of freedom
+#Multiple R-squared:  0.5013,	Adjusted R-squared:  0.4962 
+#F-statistic: 98.51 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test7d <- predict(model_all_dem7,test)
+qplot(test$TOE_DEM,pred_test7d)
+m7d <- lm(test$TOE_DEM~pred_test7d)
+summary(m7d)
+plot(m7d)
+
+#Residual standard error: 0.03544 on 98 degrees of freedom
+#Multiple R-squared:  0.6132,	Adjusted R-squared:  0.6092 
+#F-statistic: 155.3 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test7u <- predict(model_all_una7,test)
+qplot(test$TOE_UNA,pred_test7u)
+m7u <- lm(test$TOE_UNA~pred_test7u)
+summary(m7u) 
+plot(m7u)
+
+#Residual standard error: 0.2324 on 98 degrees of freedom
+#Multiple R-squared:  0.2191,	Adjusted R-squared:  0.2112 
+#F-statistic:  27.5 on 1 and 98 DF,  p-value: 9.056e-07
+pred_test7l <- predict(model_all_lib7,test)
+qplot(test$TOE_LIB,pred_test7l)
+m7l <- lm(test$TOE_LIB~pred_test7l)
+summary(m7l) 
+plot(m7l)
+```
+
+```{r removeyears}
+#2006,2008,2010,2012,2014
+modelset <- rbind(TOT06,TOT08,TOT10,TOT12,TOT14)
+
+#  mtry  RMSE        Rsquared 
+#    2   0.05077405  0.4671310
+#   60   0.04341658  0.5490119
+#  119   0.04375891  0.5407840
+model_all_dem1 <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+#  mtry  RMSE        Rsquared 
+#    2   0.05280096  0.3838104
+#   60   0.04570838  0.4540473
+#  119   0.04588438  0.4430086
+model_all_rep1 <- train(TOE_REP~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+#  mtry  RMSE        Rsquared 
+#    2   0.04776430  0.4164703
+#   60   0.04011277  0.5184200
+#  119   0.04037645  0.5099061
+model_all_una1 <- train(TOE_UNA~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+#  mtry  RMSE       Rsquared 
+#    2   0.1533635  0.4626701
+#   60   0.1342144  0.5258812
+#  119   0.1364165  0.5106938
+model_all_lib1 <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+#This represents the simplest possible model, only presidential years and only the best first search regressors. This doesn't work.
+model_occ_dem1 <- train(TOE_DEM~
+                       UBM_UNA+
+                       American.Indian+
+                       factor(county_desc), method = "rf", data =train)
+
+```
+
+```{R pred1}
+#0.6960693
+predict_2016d <- predict(model_all_dem1, TOTAL)
+sum(predict_2016d*TOTAL$Democrats+
+           +         TOTAL$DOS_DEM*TOTAL$Democrats+
+           +         TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Democrats))
+
+#0.7445334
+predict_2016r <- predict(model_all_rep1, TOTAL)
+sum(predict_2016r*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans)/(sum(TOTAL$Republicans))
+
+#0.6273274
+predict_2016u <- predict(model_all_una1, TOTAL)
+sum(predict_2016u*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated)/(sum(TOTAL$Unaffiliated))
+
+#0.5880178
+
+predict_2016l <- predict(model_all_lib1, TOTAL)
+sum(predict_2016l*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+
+#2947459
+sum(TOTAL$LOS_LIB*TOTAL$Libertarians+TOTAL$UOS_UNA*TOTAL$Unaffiliated+TOTAL$ROS_REP*TOTAL$Republicans+TOTAL$DOS_DEM*TOTAL$Democrats)
+#155265
+sum(TOTAL$LBM_LIB*TOTAL$Libertarians+TOTAL$UBM_UNA*TOTAL$Unaffiliated+TOTAL$RBM_REP*TOTAL$Republicans+TOTAL$DBM_DEM*TOTAL$Democrats)
+#1653352
+sum(predict_2016d*TOTAL$Democrats+predict_2016r*TOTAL$Republicans+predict_2016u*TOTAL$Unaffiliated+predict_2016l*TOTAL$Libertarians)
+
+#0.6896513
+sum(predict_2016r*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans+
+           predict_2016u*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated+
+           predict_2016l*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians+
+           predict_2016d*TOTAL$Democrats+
+           TOTAL$DOS_DEM*TOTAL$Democrats+
+           TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Republicans+TOTAL$Unaffiliated+TOTAL$Libertarians+TOTAL$Democrats))
+
+#4756076
+sum(predict_2016r*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans+
+           predict_2016u*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated+
+           predict_2016l*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians+
+           predict_2016d*TOTAL$Democrats+
+           TOTAL$DOS_DEM*TOTAL$Democrats+
+           TOTAL$DBM_DEM*TOTAL$Democrats)
+```
+
+
+For 2006,2008,2012,2014....this rsquared are inflated because i reset the test set so the model has been trained using some of this test data....need to reset models1
+```{r checking RSE}
+
+#Residual standard error: 0.03803 on 98 degrees of freedom
+#Multiple R-squared:  0.6151,	Adjusted R-squared:  0.6111 
+#F-statistic: 156.6 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test1r <- predict(model_all_rep1,test)
+qplot(test$TOE_REP,pred_test1r)
+m1r <- lm(test$TOE_REP~pred_test1r)
+summary(m1r) 
+plot(m1)
+
+#Residual standard error: 0.03836 on 98 degrees of freedom
+#Multiple R-squared:  0.4804,	Adjusted R-squared:  0.4751 
+#F-statistic:  90.6 on 1 and 98 DF,  p-value: 1.344e-15
+pred_test1d <- predict(model_all_dem1,test)
+qplot(test$TOE_DEM,pred_test1d)
+m1d <- lm(test$TOE_DEM~pred_test1d)
+summary(m1d)
+plot(m1d)
+
+#Residual standard error: 0.03281 on 98 degrees of freedom
+#Multiple R-squared:  0.6685,	Adjusted R-squared:  0.6651 
+#F-statistic: 197.6 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test1u <- predict(model_all_una1,test)
+qplot(test$TOE_UNA,pred_test1u)
+m1u <- lm(test$TOE_UNA~pred_test1u)
+summary(m1u) 
+plot(m1u)
+
+#Residual standard error: 0.2299 on 98 degrees of freedom
+#Multiple R-squared:  0.2364,	Adjusted R-squared:  0.2286 
+#F-statistic: 30.33 on 1 and 98 DF,  p-value: 2.931e-07
+pred_test1l <- predict(model_all_lib1,test)
+qplot(test$TOE_LIB,pred_test1l)
+m1l <- lm(test$TOE_LIB~pred_test1l)
+summary(m1l) 
+plot(m1l)
+```
+
+```{r allyears6}
+modelset <- rbind(TOT06,TOT07,TOT08,TOT09,TOT10,TOT11,TOT12,TOT13,TOT14,TOT15)
+
+#  mtry  RMSE        Rsquared 
+#    2   0.04755160  0.8889334
+#   55   0.03479460  0.9292765
+#  109   0.03558574  0.9259781
+model_all_dem6 <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+#  mtry  RMSE        Rsquared 
+#    2   0.04956951  0.9095954
+#   55   0.03752108  0.9376049
+#  109   0.03837420  0.9345577
+model_all_rep6 <- train(TOE_REP~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+#  mtry  RMSE        Rsquared 
+#    2   0.03879528  0.9072585
+#   55   0.03082213  0.9308977
+#  109   0.03150443  0.9278358
+model_all_una6 <- train(TOE_UNA~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+
+#  mtry  RMSE       Rsquared 
+#    2   0.1206683  0.5896117
+#   55   0.1192987  0.5839012
+#  109   0.1231538  0.5598469
+model_all_lib6 <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+
+```
+
+```{R pred6}
+#0.7037625
+predict_2016d6 <- predict(model_all_dem6, TOTAL)
+sum(predict_2016d6*TOTAL$Democrats+
+           +         TOTAL$DOS_DEM*TOTAL$Democrats+
+           +         TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Democrats))
+
+#0.7472145
+predict_2016r6 <- predict(model_all_rep6, TOTAL)
+sum(predict_2016r6*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans)/(sum(TOTAL$Republicans))
+
+#0.636193
+predict_2016u6 <- predict(model_all_una6, TOTAL)
+sum(predict_2016u6*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated)/(sum(TOTAL$Unaffiliated))
+
+# 0.5865055
+predict_2016l6 <- predict(model_all_lib6, TOTAL)
+sum(predict_2016l6*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+
+sum(TOTAL$LOS_LIB*TOTAL$Libertarians+TOTAL$UOS_UNA*TOTAL$Unaffiliated+TOTAL$ROS_REP*TOTAL$Republicans+TOTAL$DOS_DEM*TOTAL$Democrats)
+#Total by mail
+sum(TOTAL$LBM_LIB*TOTAL$Libertarians+TOTAL$UBM_UNA*TOTAL$Unaffiliated+TOTAL$RBM_REP*TOTAL$Republicans+TOTAL$DBM_DEM*TOTAL$Democrats)
+#total election day
+sum(predict_2016d6*TOTAL$Democrats+predict_2016r6*TOTAL$Republicans+predict_2016u6*TOTAL$Unaffiliated+predict_2016l6*TOTAL$Libertarians)
+
+sum(predict_2016r6*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans+
+           predict_2016u6*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated+
+           predict_2016l6*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians+
+           predict_2016d6*TOTAL$Democrats+
+           TOTAL$DOS_DEM*TOTAL$Democrats+
+           TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Republicans+TOTAL$Unaffiliated+TOTAL$Libertarians+TOTAL$Democrats))
+```
+
+
+```{r checking RSE6}
+
+#Residual standard error: 0.03602 on 198 degrees of freedom
+#Multiple R-squared:  0.9373,	Adjusted R-squared:  0.937 
+#F-statistic:  2962 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test6r <- predict(model_all_rep6,test)
+qplot(test$TOE_REP,pred_test6r)
+m6r <- lm(test$TOE_REP~pred_test6r)
+summary(m6r) 
+plot(m6r)
+
+#Residual standard error: 0.0354 on 198 degrees of freedom
+#Multiple R-squared:  0.9228,	Adjusted R-squared:  0.9224 
+#F-statistic:  2367 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test6d <- predict(model_all_dem6,test)
+qplot(test$TOE_DEM,pred_test6d)
+m6d <- lm(test$TOE_DEM~pred_test6d)
+summary(m6d)
+plot(m6d)
+
+#Residual standard error: 0.01664 on 78 degrees of freedom
+#Residual standard error: 0.02946 on 198 degrees of freedom
+#Multiple R-squared:  0.931,	Adjusted R-squared:  0.9306 
+#F-statistic:  2671 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test6u <- predict(model_all_una6,test)
+qplot(test$TOE_UNA,pred_test6u)
+m6u <- lm(test$TOE_UNA~pred_test6u)
+summary(m6u) 
+plot(m6u)
+
+#Residual standard error: 0.1053 on 198 degrees of freedom
+#Multiple R-squared:   0.57,	Adjusted R-squared:  0.5678 
+#F-statistic: 262.4 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test6l <- predict(model_all_lib6,test)
+qplot(test$TOE_LIB,pred_test6l)
+m6l <- lm(test$TOE_LIB~pred_test6l)
+summary(m6l) 
+plot(m6l)
+```
+
+```{r SPyears}
+#Model off of senate and presidential years
+modelset <- rbind(TOT06,TOT08,TOT10,TOT12,TOT14)
+
+
+model_all_dem2 <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+model_all_rep2 <- train(TOE_REP~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+model_all_una2 <- train(TOE_UNA~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+model_all_lib2 <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+
+```
+
+```{R pred2}
+#Model_all_dem2 predicting 69.2831%
+#mtry  RMSE        Rsquared 
+#    2   0.04947211  0.4764234
+#   60   0.04205081  0.5578869
+#  119   0.04237934  0.5493418
+predict_2016d2 <- predict(model_all_dem2, TOTAL)
+sum(predict_2016d2*TOTAL$Democrats+
+           +         TOTAL$DOS_DEM*TOTAL$Democrats+
+           +         TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Democrats))
+
+#Model_all_rep2 predicting 74.83701% turnout
+#mtry  RMSE        Rsquared 
+#    2   0.04974701  0.3660890
+#   60   0.04248796  0.4652165
+#  119   0.04303223  0.4467782
+predict_2016r2 <- predict(model_all_rep2, TOTAL)
+sum(predict_2016r2*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans)/(sum(TOTAL$Republicans))
+
+#Model_all_una2 predicting 62.70787% turnout
+#mtry  RMSE        Rsquared 
+#    2   0.04431994  0.4258452
+#   60   0.03764332  0.5280513
+#  119   0.03824484  0.5116116
+predict_2016u2 <- predict(model_all_una2, TOTAL)
+sum(predict_2016u2*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated)/(sum(TOTAL$Unaffiliated))
+
+#model_all_lib2 predicting 60.34166% turnout
+#  mtry  RMSE       Rsquared 
+#    2   0.1603284  0.3770412
+#   60   0.1625002  0.3427716
+#  119   0.1665231  0.3264661
+predict_2016l2 <- predict(model_all_lib2, TOTAL)
+sum(predict_2016l2*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+```
+
+```{r checking RSE2}
+#Residual standard error: 0.04126 on 98 degrees of freedom
+#Multiple R-squared:  0.5866,	Adjusted R-squared:  0.5823 
+#F-statistic:   139 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test2r <- predict(model_all_rep2,test)
+qplot(test$TOE_REP,pred_test2r)
+m2r <- lm(test$TOE_REP~pred_test2r)
+summary(m2r) 
+plot(m2r)
+
+#Residual standard error: 0.04054 on 98 degrees of freedom
+#Multiple R-squared:  0.5377,	Adjusted R-squared:  0.533 
+#F-statistic:   114 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test2d <- predict(model_all_dem2,test)
+qplot(test$TOE_DEM,pred_test2d)
+m2d <- lm(test$TOE_DEM~pred_test2d)
+summary(m2d)
+plot(m2d)
+
+#Residual standard error: 0.03863 on 98 degrees of freedom
+#Multiple R-squared:  0.6025,	Adjusted R-squared:  0.5985 
+#F-statistic: 148.5 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test2u <- predict(model_all_una2,test)
+qplot(test$TOE_UNA,pred_test2u)
+m2u <- lm(test$TOE_UNA~pred_test2u)
+summary(m2u) 
+plot(m2u)
+
+#Residual standard error: 0.1498 on 98 degrees of freedom
+#Multiple R-squared:  0.5415,	Adjusted R-squared:  0.5368 
+#F-statistic: 115.7 on 1 and 98 DF,  p-value: < 2.2e-16
+pred_test2l <- predict(model_all_lib2,test)
+qplot(test$TOE_LIB,pred_test2l)
+m2l <- lm(test$TOE_LIB~pred_test2l)
+summary(m2l) 
+plot(m2l)
+```
+
+```{r allyears}
+#Model off of senate and presidential and off years
+modelset <- rbind(TOT06,TOT07,TOT08,TOT09,TOT10,TOT11,TOT12,TOT13,TOT14,TOT15)
+
+
+model_all_dem3 <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+model_all_rep3 <- train(TOE_REP~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+model_all_una3 <- train(TOE_UNA~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+model_all_lib3 <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       Democrats+
+                       Republicans+
+                       Unaffiliated+
+                       Libertarians+
+                       Male+
+                       Female+
+                       American.Indian+
+                       Black+
+                       White+
+                       Hispanic+
+                       Other+
+                       factor(county_desc)+
+                       factor(type), method = "rf", data =train)
+
+
+```
+
+Need to be careful with these, the R^2 is only so high because the off year data increase the variance and then the election type variable explains most of it away.
+
+```{R pred3}
+#Model_all_dem3 predicting 69.80051%
+#mtry  RMSE        Rsquared 
+#    2   0.05749656  0.8758419
+#   61   0.03161774  0.9411873
+#  120   0.03226598  0.9386785
+predict_2016d3 <- predict(model_all_dem3, TOTAL)
+sum(predict_2016d3*TOTAL$Democrats+
+           +         TOTAL$DOS_DEM*TOTAL$Democrats+
+           +         TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Democrats))
+
+#Model_all_rep3 predicting 74.85386% turnout
+#mtry  RMSE        Rsquared 
+#    2   0.05968313  0.9098409
+#   61   0.03306717  0.9507167
+#  120   0.03389442  0.9477776
+predict_2016r3 <- predict(model_all_rep3, TOTAL)
+sum(predict_2016r3*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans)/(sum(TOTAL$Republicans))
+
+#Model_all_una3 predicting 63.12851% turnout
+#mtry  RMSE        Rsquared 
+#    2   0.04899797  0.8990289
+#   61   0.02908342  0.9393244
+#  120   0.02947060  0.9375413
+predict_2016u3 <- predict(model_all_una3, TOTAL)
+sum(predict_2016u3*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated)/(sum(TOTAL$Unaffiliated))
+
+#mtry  RMSE       Rsquared 
+#    2   0.1223312  0.5950627
+#   61   0.1167774  0.6002946
+#  120   0.1224191  0.5721409
+predict_2016l3 <- predict(model_all_lib3, TOTAL)
+sum(predict_2016l3*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+```
+
+```{r checking RSE3}
+#Residual standard error: 0.03367 on 198 degrees of freedom
+#Multiple R-squared:  0.9452,	Adjusted R-squared:  0.945 
+#F-statistic:  3417 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test3r <- predict(model_all_rep3,test)
+qplot(test$TOE_REP,pred_test3r)
+m3r <- lm(test$TOE_REP~pred_test3r)
+summary(m3r) 
+plot(m3r)
+
+#Residual standard error: 0.03384 on 198 degrees of freedom
+#Multiple R-squared:  0.9295,	Adjusted R-squared:  0.9291 
+#F-statistic:  2609 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test3d <- predict(model_all_dem3,test)
+qplot(test$TOE_DEM,pred_test3d)
+m3d <- lm(test$TOE_DEM~pred_test3d)
+summary(m3d)
+plot(m3d)
+
+#Residual standard error: 0.02842 on 198 degrees of freedom
+#Multiple R-squared:  0.9358,	Adjusted R-squared:  0.9355 
+#F-statistic:  2886 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test3u <- predict(model_all_una3,test)
+qplot(test$TOE_UNA,pred_test3u)
+m3u <- lm(test$TOE_UNA~pred_test3u)
+summary(m3u) 
+plot(m3u)
+
+#Residual standard error: 0.1062 on 198 degrees of freedom
+#Multiple R-squared:  0.5628,	Adjusted R-squared:  0.5606 
+#F-statistic: 254.9 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test3l <- predict(model_all_lib3,test)
+qplot(test$TOE_LIB,pred_test3l)
+m3l <- lm(test$TOE_LIB~pred_test3l)
+summary(m3l) 
+plot(m3l)
+```
+
+Narrowing down the predictor space, trying glm and lm for all years
+```{r Narrowing}
+modelset <- rbind(TOT06,TOT07,TOT08,TOT09,TOT10,TOT11,TOT12,TOT13,TOT14,TOT15)
+
+#  RMSE        Rsquared 
+#  0.04924276  0.8605882
+model_all_dem4 <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "lm", data =train)
+#  RMSE        Rsquared 
+#  0.05183229  0.8796501
+model_all_rep4 <- train(TOE_REP~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "lm", data =train)
+
+#  RMSE        Rsquared 
+#  0.04058986  0.8828951
+model_all_una4 <- train(TOE_UNA~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "lm", data =train)
+
+#Forcing intercept to zero for libertarian model
+#   RMSE       Rsquared 
+#  0.1454747  0.4362572
+model_all_lib4 <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type)-
+                              1, method = "lm", data =train)
+
+#Free Intercept
+#  RMSE       Rsquared 
+#  0.1400139  0.4611083
+model_all_lib4i <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "lm", data =train)
+
+```
+
+```{R pred4}
+#0.7137448
+predict_2016d4 <- predict(model_all_dem4, TOTAL)
+sum(predict_2016d4*TOTAL$Democrats+
+           +         TOTAL$DOS_DEM*TOTAL$Democrats+
+           +         TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Democrats))
+
+#0.7832992
+predict_2016r4 <- predict(model_all_rep4, TOTAL)
+sum(predict_2016r4*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans)/(sum(TOTAL$Republicans))
+
+#0.64633
+predict_2016u4 <- predict(model_all_una4, TOTAL)
+sum(predict_2016u4*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated)/(sum(TOTAL$Unaffiliated))
+
+#0.6407156
+predict_2016l4 <- predict(model_all_lib4, TOTAL)
+sum(predict_2016l4*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+
+#0.6407156
+predict_2016l4i <- predict(model_all_lib4i, TOTAL)
+sum(predict_2016l4i*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+```
+
+```{r checking RSE4}
+#Residual standard error: 0.04413 on 198 degrees of freedom
+#Multiple R-squared:  0.9059,	Adjusted R-squared:  0.9054 
+#F-statistic:  1906 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test4r <- predict(model_all_rep4,test)
+qplot(test$TOE_REP,pred_test4r)
+m4r <- lm(test$TOE_REP~pred_test4r)
+summary(m4r) 
+plot(m4r)
+
+#  Residual standard error: 0.04374 on 198 degrees of freedom
+#Multiple R-squared:  0.8821,	Adjusted R-squared:  0.8815 
+#F-statistic:  1482 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test4d <- predict(model_all_dem4,test)
+qplot(test$TOE_DEM,pred_test4d)
+m4d <- lm(test$TOE_DEM~pred_test4d)
+summary(m4d)
+plot(m4d)
+
+#  Residual standard error: 0.03391 on 198 degrees of freedom
+# Multiple R-squared:  0.9085,	Adjusted R-squared:  0.9081 
+# F-statistic:  1967 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test4u <- predict(model_all_una4,test)
+qplot(test$TOE_UNA,pred_test4u)
+m4u <- lm(test$TOE_UNA~pred_test4u)
+summary(m4u) 
+plot(m4u)
+
+#  Residual standard error: 0.1133 on 198 degrees of freedom
+#Multiple R-squared:  0.5027,	Adjusted R-squared:  0.5001 
+#F-statistic: 200.1 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test4l <- predict(model_all_lib4,test)
+qplot(test$TOE_LIB,pred_test4l)
+m4l <- lm(test$TOE_LIB~pred_test4l)
+summary(m4l) 
+plot(m4l)
+
+#Residual standard error: 0.1133 on 198 degrees of freedom
+#Multiple R-squared:  0.5027,	Adjusted R-squared:  0.5001 
+#F-statistic: 200.1 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test4li <- predict(model_all_lib4i,test)
+qplot(test$TOE_LIB,pred_test4li)
+m4li <- lm(test$TOE_LIB~pred_test4li)
+summary(m4li) 
+plot(m4li)
+```
+
+```{r Narrowing5}
+modelset <- rbind(TOT06,TOT07,TOT08,TOT09,TOT10,TOT11,TOT12,TOT13,TOT14,TOT15)
+
+#    RMSE        Rsquared 
+#  0.04941719  0.8596467
+model_all_dem5 <- train(TOE_DEM~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "glm", data =train)
+#    RMSE        Rsquared
+#  0.05220339  0.879359
+model_all_rep5 <- train(TOE_REP~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "glm", data =train)
+
+#    RMSE        Rsquared 
+#  0.04073021  0.8813735
+model_all_una5 <- train(TOE_UNA~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "glm", data =train)
+
+#Forcing intercept to zero for libertarian model
+#  RMSE       Rsquared 
+#  0.1467834  0.4360519
+model_all_lib5 <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type)-
+                              1, method = "glm", data =train)
+
+#Free Intercept
+#  RMSE       Rsquared
+#  0.1386152  0.46715 
+model_all_lib5i <- train(TOE_LIB~
+                       DOS_DEM+
+                       ROS_REP+
+                       UOS_UNA+
+                       LOS_LIB+
+                       DBM_DEM+
+                       RBM_REP+
+                       UBM_UNA+
+                       LBM_LIB+
+                       factor(county_desc)+
+                       factor(type), method = "glm", data =train)
+
+```
+
+```{R pred5}
+#0.7137448
+predict_2016d5 <- predict(model_all_dem5, TOTAL)
+sum(predict_2016d5*TOTAL$Democrats+
+           +         TOTAL$DOS_DEM*TOTAL$Democrats+
+           +         TOTAL$DBM_DEM*TOTAL$Democrats)/(sum(TOTAL$Democrats))
+
+#0.7832992
+predict_2016r5 <- predict(model_all_rep5, TOTAL)
+sum(predict_2016r5*TOTAL$Republicans+
+           TOTAL$ROS_REP*TOTAL$Republicans+
+           TOTAL$RBM_REP*TOTAL$Republicans)/(sum(TOTAL$Republicans))
+
+#0.6312851
+predict_2016u5 <- predict(model_all_una5, TOTAL)
+sum(predict_2016u5*TOTAL$Unaffiliated+
+           TOTAL$UOS_UNA*TOTAL$Unaffiliated+
+           TOTAL$UBM_UNA*TOTAL$Unaffiliated)/(sum(TOTAL$Unaffiliated))
+
+#0.6407156
+predict_2016l5 <- predict(model_all_lib5, TOTAL)
+sum(predict_2016l5*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+
+#0.6407156
+predict_2016l5i <- predict(model_all_lib5i, TOTAL)
+sum(predict_2016l5i*TOTAL$Libertarians+
+           TOTAL$LOS_LIB*TOTAL$Libertarians+
+           TOTAL$LBM_LIB*TOTAL$Libertarians)/(sum(TOTAL$Libertarians))
+```
+
+```{r checking RSE5}
+#Residual standard error: 0.04413 on 198 degrees of freedom
+#Multiple R-squared:  0.9059,	Adjusted R-squared:  0.9054 
+#F-statistic:  1906 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test5r <- predict(model_all_rep5,test)
+qplot(test$TOE_REP,pred_test5r)
+m5r <- lm(test$TOE_REP~pred_test5r)
+summary(m5r) 
+plot(m5r)
+
+#  Residual standard error: 0.04374 on 198 degrees of freedom
+#Multiple R-squared:  0.8821,	Adjusted R-squared:  0.8815 
+#F-statistic:  1482 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test5d <- predict(model_all_dem5,test)
+qplot(test$TOE_DEM,pred_test5d)
+m5d <- lm(test$TOE_DEM~pred_test5d)
+summary(m5d)
+plot(m5d)
+
+#  Residual standard error: 0.03391 on 198 degrees of freedom
+# Multiple R-squared:  0.9085,	Adjusted R-squared:  0.9081 
+# F-statistic:  1967 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test5u <- predict(model_all_una5,test)
+qplot(test$TOE_UNA,pred_test5u)
+m5u <- lm(test$TOE_UNA~pred_test5u)
+summary(m5u) 
+plot(m5u)
+
+#  Residual standard error: 0.1133 on 198 degrees of freedom
+#Multiple R-squared:  0.5027,	Adjusted R-squared:  0.5001 
+#F-statistic: 200.1 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test5l <- predict(model_all_lib5,test)
+qplot(test$TOE_LIB,pred_test5l)
+m5l <- lm(test$TOE_LIB~pred_test5l)
+summary(m5l) 
+plot(m5l)
+
+#Residual standard error: 0.1133 on 198 degrees of freedom
+#Multiple R-squared:  0.5027,	Adjusted R-squared:  0.5001 
+#F-statistic: 200.1 on 1 and 198 DF,  p-value: < 2.2e-16
+pred_test5li <- predict(model_all_lib5i,test)
+qplot(test$TOE_LIB,pred_test5li)
+m5li <- lm(test$TOE_LIB~pred_test5li)
+summary(m5li) 
+plot(m5li)
+```
+
+```{r agg1}
+
+data[gender=="M",Male:=1]
+data[gender=="F",Female:=1]
+data[is.na(dat)] <- 0
+
+county_res <- data.frame(predict_2016dF,predict_2016rF,predict_2016uF,predict_2016lF)
+names(county_res)[1:4] <- c("Percent DEM", "Percent REP", "Percent UNA", "Percent LIB")
+county_res  <- format(mutate(county_res, DEM = round(predict_2016dF*TOTAL$Democrats+TOTAL$DOS+TOTAL$DBM),REP = round(predict_2016rF*TOTAL$Republicans+TOTAL$ROS+TOTAL$RBM),UNA = round(predict_2016uF*TOTAL$Unaffiliated+TOTAL$UOS+TOTAL$UBM),LIB = round(predict_2016lF*TOTAL$Libertarians+TOTAL$LOS+TOTAL$LBM),"Percent DEM" = DEM/TOTAL$Democrats*100, "Percent REP" = REP/TOTAL$Republicans*100, "Percent UNA" = UNA/TOTAL$Unaffiliated*100, "Percent LIB" = LIB/TOTAL$Libertarians*100, County = TOTAL$county_desc),digits=3)
+
+setcolorder(county_res, c("County", "DEM", "REP", "UNA", "LIB", "Percent DEM","Percent REP", "Percent UNA", "Percent LIB"))
 ```
 
 ## Including Plots
 
-You can also embed plots, for example:
-
+Joining the aggregated csvs
+head
 ```{r pressure, echo=FALSE}
-plot(pressure)
+names <- list.files()[1:11]
+dat <- lapply(names,read.csv)
+
+#Read in total columns and add total DEMS, REP, UNA, LIB, and RACE
+rbind(dat[[3]],dat[[4]],dat[[5]],dat[[6]],dat[[7]],dat[[9]],dat[[10]])
+names(dat[[8]])[2] <- c("County_desc")
+names(dat[[3]])[2] <- c("County_desc")
+rbind(dat[[1]],dat[[2]],dat[[8]])
+
+#Was originally going to use age in the model but eliminated it because the low variance and inconsistent data collection
+Abind <- Abind[,-7]
+
+Bbind <- rbind(dat[[1]],dat[[2]],Abind)
+
+nums <- c(1915618,1553310,1295391)
+trump <- c(0,1,.465)
+hil <- c(1, 0, .457)
+party <- c("DEM", "REP", "UNA")
+mat <- data.table(party, nums, hil, trump)
+mat <- mutate(mat, tvot = nums*trump, hvot = hil*nums)
+apply(mat[,2:6], 2, sum)
 ```
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
